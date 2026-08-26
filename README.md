@@ -164,6 +164,39 @@ python backfill.py -111
 
 ## 24/7
 
-Нужен постоянно включённый процесс (домашний ПК, Raspberry Pi, VPS). Serverless/Render free не подойдёт — нужен живой WebSocket.
+Нужен постоянно включённый процесс (NAS, домашний ПК, VPS). Serverless/Render free не подойдёт — нужен живой WebSocket.
 
-На VPS: клон репо, `.env` руками, `systemd` с `Restart=always` и `ExecStart=.../python starter.py`.
+Один `MAX_TOKEN` = одна сессия. Когда бот крутится на NAS, `starter.py` на ПК останови.
+
+### Synology (Container Manager)
+
+1. Package Center → **Container Manager** (если нет — Docker)
+2. File Station: папка, например `/volume1/docker/max-tg-bridge`
+3. Положи туда файлы репо **без** `.venv`. `.env` — тот же, что дома (File Station → загрузить)
+4. Container Manager → **Проект** → Создать:
+   - путь: эта папка
+   - имя: `max-tg-bridge`
+   - источник: `docker-compose.yml`
+5. Собрать и запустить. `restart: unless-stopped` — поднимется после ребута NAS
+
+Логи: контейнер `max-tg-bridge-bridge-1` → Журнал. В Telegram на `MONITOR_ID` должны прийти «скрипт запущен» / «MAX онлайн».
+
+Обновить код: залей новые `.py` в ту же папку → Проект → **Собрать** (rebuild).
+
+Через SSH:
+
+```bash
+sudo mkdir -p /volume1/docker/max-tg-bridge
+# скопируй файлы (scp / File Station), .env руками
+cd /volume1/docker/max-tg-bridge
+sudo docker compose up -d --build
+sudo docker compose logs -f
+```
+
+Если `docker compose` нет: `sudo docker-compose`. Образ `python:3.12-slim` есть для x86_64 и arm64 (плюс-модели и новые ARM). Старый 32-bit ARM — не взлетит.
+
+Firewall DSM: исходящие 443 к `api.telegram.org` и `wss://ws-api.oneme.ru` не режь.
+
+### VPS
+
+Клон репо, `.env` руками, `systemd` с `Restart=always` и `ExecStart=.../python starter.py`. Либо тот же `docker compose up -d`.
