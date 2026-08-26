@@ -5,6 +5,14 @@ services:
     env_file: .env
     environment:
       TZ: Europe/Moscow
+    volumes:
+      - ./main.py:/app/main.py:ro
+      - ./max.py:/app/max.py:ro
+      - ./classes.py:/app/classes.py:ro
+      - ./telegram.py:/app/telegram.py:ro
+      - ./starter.py:/app/starter.py:ro
+      - ./filters.py:/app/filters.py:ro
+      - ./errors.py:/app/errors.py:ro
     logging:
       driver: json-file
       options:

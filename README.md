@@ -177,13 +177,13 @@ python backfill.py -111
    - путь: эта папка
    - имя: `max-tg-bridge`
    - источник: `docker-compose.yml`
-5. Собрать и запустить. `restart: unless-stopped` — поднимется после ребута NAS
+5. Создать проект и запустить. `restart: unless-stopped` — поднимется после ребута NAS
 
-Логи: контейнер `max-tg-bridge-bridge-1` → Журнал. В Telegram на `MONITOR_ID` должны прийти «скрипт запущен» / «MAX онлайн».
+Обновить код: залей `.py` в ту же папку → контейнер **Стоп → Старт** (файлы примонтированы, rebuild не нужен).
 
-Обновить код: залей новые `.py` в ту же папку → Проект → **Собрать** (rebuild).
+Если правишь `Dockerfile`/`requirements.txt` — проект удалить (файлы на диске оставить) и создать заново.
 
-Через SSH:
+Через SSH (Control Panel → Терминал → включить SSH, пользователь admin):
 
 ```bash
 sudo mkdir -p /volume1/docker/max-tg-bridge
