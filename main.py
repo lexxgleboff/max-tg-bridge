@@ -117,7 +117,11 @@ def onmessage(client: Client, message: Message):
     if tg_id and message.status != "REMOVED":
         msg_text = message.text
         msg_attaches = message.attaches
-        name = message.user.contact.names[0].name
+        name = "?"
+        if message.user and message.user.contact.names:
+            name = message.user.contact.names[0].name
+        elif message.sender:
+            name = str(message.sender)
         if "link" in message.kwargs.keys():
             if "type" in message.kwargs["link"]:
                 if message.kwargs["link"]["type"] == "REPLY":

@@ -371,7 +371,10 @@ class MaxClient:
                 continue
             try:
                 payload = recv.get("payload") or {}
-                msg = Message(self, payload["chatId"], **payload["message"])
+                raw = payload.get("message")
+                if not raw or payload.get("chatId") is None:
+                    continue
+                msg = Message(self, payload["chatId"], **raw)
                 self._hlprocessor(msg)
             except Exception as e:
                 print("Ошибка обработки сообщения:", e)
