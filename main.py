@@ -6,7 +6,7 @@ import os, time, html, sys
 from dotenv import load_dotenv
 import threading
 
-load_dotenv()
+load_dotenv(override=True)
 
 MAX_TOKEN = os.getenv("MAX_TOKEN")
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")

@@ -13,6 +13,7 @@ services:
       - ./starter.py:/app/starter.py:ro
       - ./filters.py:/app/filters.py:ro
       - ./errors.py:/app/errors.py:ro
+      - ./.env:/app/.env:ro
     logging:
       driver: json-file
       options:

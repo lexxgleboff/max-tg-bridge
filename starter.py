@@ -7,7 +7,7 @@ import threading
 from telegram import setup_alerts, alert
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 MONITOR_ID = os.getenv("MONITOR_ID") or os.getenv("TG_CHAT_ID")
 setup_alerts(TG_BOT_TOKEN, MONITOR_ID)

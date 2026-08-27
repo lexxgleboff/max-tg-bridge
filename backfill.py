@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 from max import MaxClient as Client
 from telegram import send_to_telegram, unwrap_msg, format_control, parse_bridges
 
-load_dotenv()
+load_dotenv(override=True)
 
 CHAT_ID = int(sys.argv[1]) if len(sys.argv) > 1 else -72295902829133
 LIMIT = int(sys.argv[2]) if len(sys.argv) > 2 else 0
