@@ -42,6 +42,7 @@ class MaxClient:
         self._on_disconnect = None
         self._on_auth_error = None
         self._on_error = None
+        self._on_reaction = None
         self._connected = False
         self._t = None
         self._t_stop = False
@@ -358,6 +359,8 @@ class MaxClient:
                 return
             case 128:
                 self._inbox.put(recv)
+            case 155 | 156:
+                self._inbox.put(recv)
             case _:
                 pass
 
@@ -370,7 +373,12 @@ class MaxClient:
             except queue.Empty:
                 continue
             try:
+                opcode = recv.get("opcode")
                 payload = recv.get("payload") or {}
+                if opcode in (155, 156):
+                    if self._on_reaction:
+                        self._on_reaction(payload)
+                    continue
                 raw = payload.get("message")
                 if not raw or payload.get("chatId") is None:
                     continue
@@ -549,8 +557,7 @@ class MaxClient:
     #     return response
 
     def send_text(self, chat_id: int, text: str, notify: bool = True):
-        """Send text without waiting on websocket (safe from other threads)."""
-        self.websocket.send(json.dumps({
+        recv = self._call({
             "ver": 11,
             "cmd": 0,
             "seq": self.seq,
@@ -561,11 +568,12 @@ class MaxClient:
                     "text": text,
                     "cid": self.cid,
                     "elements": [],
-                    "attaches": []
+                    "attaches": [],
                 },
-                "notify": notify
-            }
-        }))
+                "notify": notify,
+            },
+        }, 64)
+        return ((recv.get("payload") or {}).get("message") or {}).get("id")
 
     # region send_message()
     def send_message(self, chat_id: int, text: str, reply_id: str|int = None, notify: bool = True):
@@ -829,6 +837,16 @@ class MaxClient:
         self.websocket.send(json.dumps(j))
         self.disconnect()
         return True
+
+    def get_reactions(self, chat_id, message_id) -> dict:
+        try:
+            return (self._call({
+                "ver": 11, "cmd": 0, "seq": self.seq, "opcode": 181,
+                "payload": {"chatId": int(chat_id), "messageId": str(message_id), "count": 100},
+            }, 181).get("payload") or {})
+        except Exception as e:
+            print("get_reactions:", e)
+            return {}
     
     # region set_reaction()
     def set_reaction(self, chat_id, message_id, reaction: EMOJIS):

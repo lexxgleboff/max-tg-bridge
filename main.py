@@ -1,7 +1,7 @@
 from max import MaxClient as Client
 from filters import filters
 from classes import Message
-from telegram import send_to_telegram, drain_updates, get_updates, format_control, setup_alerts, alert, parse_bridges, tg_chat_title, remember_tg_title
+from telegram import send_to_telegram, drain_updates, get_updates, format_control, setup_alerts, alert, parse_bridges, tg_chat_title, remember_tg_title, set_tg_reaction, _send_text
 import os, time, html, sys
 from dotenv import load_dotenv
 import threading
@@ -22,7 +22,56 @@ client = Client(MAX_TOKEN)
 
 _sent_lock = threading.Lock()
 _sent_to_max = []
+_max_to_tg = {}
+_react_seen = {}
 STATE = {"up": time.time(), "last_max": None, "last_tg": None, "ok": False}
+
+def remember_bridge_msg(max_chat, max_mid, tg_chat, tg_mid, snippet=""):
+    if max_mid is None or not tg_mid:
+        return
+    snip = " ".join((snippet or "").split())[:80]
+    with _sent_lock:
+        _max_to_tg[(int(max_chat), str(max_mid))] = (int(tg_chat), int(tg_mid), snip)
+        while len(_max_to_tg) > 800:
+            _max_to_tg.pop(next(iter(_max_to_tg)))
+
+def apply_max_reaction(max_chat, max_mid, emojis: list[str]):
+    tg_id = MAX_TO_TG.get(int(max_chat) if max_chat is not None else 0)
+    if not tg_id or max_mid is None:
+        return
+    with _sent_lock:
+        pair = _max_to_tg.get((int(max_chat), str(max_mid)))
+    if not pair:
+        print("react skip, no map", max_chat, max_mid)
+        return
+    tg_chat, tg_mid = pair[0], pair[1]
+    snip = pair[2] if len(pair) > 2 else ""
+    set_tg_reaction(TG_BOT_TOKEN, tg_chat, tg_mid, emojis)
+    try:
+        raw = client.get_reactions(max_chat, max_mid)
+    except Exception as e:
+        print("react who:", e)
+        return
+    now = set()
+    for r in raw.get("reactions") or []:
+        uid, em = r.get("userId"), r.get("reaction")
+        if uid is not None and em:
+            now.add((int(uid), em))
+    key = (int(max_chat), str(max_mid))
+    with _sent_lock:
+        prev = _react_seen.get(key, set())
+        _react_seen[key] = now
+        while len(_react_seen) > 800:
+            _react_seen.pop(next(iter(_react_seen)))
+    for uid, em in sorted(now - prev):
+        line = f"{em} <b>{html.escape(_uname(client, uid))}</b>"
+        if snip:
+            line += f"\nна: <i>{html.escape(snip)}</i>"
+        _send_text(TG_BOT_TOKEN, tg_chat, line, reply_to=tg_mid)
+
+def _react_emojis(info: dict) -> list[str]:
+    counters = (info or {}).get("counters") or []
+    return [c.get("reaction") for c in counters if c.get("count") and c.get("reaction")]
 
 def remember_max_out(max_id: int, text: str):
     with _sent_lock:
@@ -109,12 +158,25 @@ client._on_disconnect = lambda: alert("MAX websocket оборван, переп�
 client._on_auth_error = lambda e: alert(f"MAX токен невалиден: {e}\nОбнови MAX_TOKEN в .env (web.max.ru)", key="auth", cooldown=300)
 client._on_error = lambda e: alert(str(e), key=str(e)[:50], cooldown=120)
 
+def _on_reaction(payload: dict):
+    chat = payload.get("chatId")
+    mid = payload.get("messageId")
+    info = payload.get("reactionInfo") or payload
+    emojis = _react_emojis(info)
+    print("REACT", chat, mid, emojis)
+    apply_max_reaction(chat, mid, emojis)
+
+client._on_reaction = _on_reaction
+
 @client.on_message(filters.any())
 def onmessage(client: Client, message: Message):
     if is_max_echo(message.chat.id, message.text):
         return
     tg_id = MAX_TO_TG.get(message.chat.id)
     if tg_id and message.status != "REMOVED":
+        if message.status == "EDITED":
+            apply_max_reaction(message.chat.id, message.id, _react_emojis(message.reaction_info or {}))
+            return
         msg_text = message.text
         msg_attaches = message.attaches
         name = "?"
@@ -137,17 +199,20 @@ def onmessage(client: Client, message: Message):
         controls = [a for a in msg_attaches if a.get("_type") == "CONTROL"]
         media = [a for a in msg_attaches if a.get("_type") != "CONTROL"]
         try:
+            ids = []
             for c in controls:
                 t = format_control(c, name, lambda uid, cl=client: _uname(cl, uid))
                 if t:
-                    send_to_telegram(TG_BOT_TOKEN, tg_id, t)
+                    ids.extend(send_to_telegram(TG_BOT_TOKEN, tg_id, t) or [])
             if msg_text or media:
-                send_to_telegram(
+                ids.extend(send_to_telegram(
                     TG_BOT_TOKEN,
                     tg_id,
                     f"<b>{name}</b>\n{msg_text}" if msg_text else f"<b>{name}</b>",
                     media
-                )
+                ) or [])
+            if ids:
+                remember_bridge_msg(message.chat.id, message.id, tg_id, ids[0], msg_text or name)
             STATE["last_max"] = time.time()
         except Exception as e:
             alert(f"отправка в TG: {e}", key="tg_send", cooldown=120)
@@ -192,9 +257,14 @@ def tg_poll():
                     text = "[фото]"
                 if not text:
                     continue
+                tg_mid = msg.get("message_id")
                 for max_id in max_ids:
                     remember_max_out(max_id, text)
-                    client.send_text(max_id, text)
+                    try:
+                        mid = client.send_text(max_id, text)
+                        remember_bridge_msg(max_id, mid, chat_id, tg_mid, text)
+                    except Exception as e:
+                        print("send max:", e)
                 STATE["last_tg"] = time.time()
         except Exception as e:
             print("TG poll:", e)
