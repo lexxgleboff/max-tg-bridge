@@ -75,6 +75,48 @@ def unwrap_msg(m: dict) -> tuple[str, list, object]:
             text = f"↪ {q[:300]}\n{text}" if text else f"↪ {q[:300]}"
     return text, m.get("attaches") or [], m.get("sender")
 
+def is_poll(a: dict) -> bool:
+    t = a.get("_type")
+    p = a.get("poll") if isinstance(a.get("poll"), dict) else a
+    if t == "POLL" or p.get("_type") == "POLL":
+        return True
+    return bool(p.get("answers") or p.get("options") or p.get("pollId"))
+
+def format_poll(a: dict) -> str:
+    p = a.get("poll") if isinstance(a.get("poll"), dict) else a
+    title = p.get("title") or p.get("question") or a.get("title") or ""
+    answers = p.get("answers") or p.get("options") or []
+    lines = []
+    if title:
+        lines.append(f"📊 {html.escape(str(title))}")
+    for k in ("subtitle", "description"):
+        if p.get(k):
+            lines.append(html.escape(str(p[k])))
+    total = p.get("voteCount") or p.get("totalCount")
+    summed = 0
+    for ans in answers:
+        if isinstance(ans, str):
+            text, n = ans, None
+        else:
+            text = str(ans.get("text") or ans.get("title") or ans.get("name") or "")
+            n = ans.get("count") or ans.get("voteCount") or ans.get("votes")
+            if n is None:
+                ids = ans.get("voterIds") or ans.get("userIds") or ans.get("voters")
+                n = len(ids) if isinstance(ids, list) else None
+        if isinstance(n, int):
+            summed += n
+            lines.append(f"• {html.escape(text)} — {n}")
+        else:
+            lines.append(f"• {html.escape(text)}")
+    if not isinstance(total, int):
+        total = summed
+    if total:
+        lines.append(f"{total} голосов")
+    if not lines:
+        print("poll dump", {k: p.get(k) for k in list(p)[:20]})
+        return "опрос"
+    return "\n".join(lines)
+
 def format_control(attach: dict, actor: str, uname) -> str:
     ev = attach.get("event")
     if ev == "add":
@@ -95,13 +137,22 @@ def format_control(attach: dict, actor: str, uname) -> str:
     return ""
 
 def handle_attach(attach: dict) -> str:
-    match attach.get("_type"):
+    t = attach.get("_type")
+    if is_poll(attach):
+        return format_poll(attach)
+    match t:
         case "CONTROL" | "PHOTO" | "VIDEO" | "AUDIO" | "STICKER" | "WIDGET":
             return ""
         case "FILE":
             return "" if attach_url(attach) else (attach.get("name") or "файл")
+        case "UNSUPPORTED":
+            if attach.get("audioId") or attach.get("duration"):
+                return "голосовое"
+            print("unsupported attach", list(attach.keys()))
+            return "вложение"
         case _:
-            return attach.get("_type") or ""
+            print("unknown attach", t, list(attach.keys()))
+            return t or ""
 
 def attach_url(a: dict) -> str | None:
     for k in ("baseUrl", "baseRawUrl", "url", "mp4Url", "MP4_1080"):
