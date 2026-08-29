@@ -116,12 +116,17 @@ class MaxClient:
         if self._connected:
             return
         headers = [
-            ("Origin", "https://web.oneme.ru"),
+            ("Origin", "https://web.max.ru"),
             ("Pragma", "no-cache"),
             ("Cache-Control", "no-cache"),
-            ("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36")
+            ("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
         ]
-        self.websocket = connect("wss://ws-api.oneme.ru/websocket", additional_headers=headers)
+        self.websocket = connect(
+            "wss://ws-api.oneme.ru/websocket",
+            additional_headers=headers,
+            ping_interval=20,
+            ping_timeout=20,
+        )
         self.websocket.send(self.user_agent)
         self.websocket.recv()
 
@@ -275,19 +280,19 @@ class MaxClient:
                 return  
 
     def _heartbeat(self):
-        """Отправляет пинг серверу каждые 25 секунд"""
-        while self._connected and not self._t_stop:
-            try:
-                self.websocket.send(json.dumps({
-                    "ver": 11,
-                    "cmd": 0,
-                    "seq": self.seq,
-                    "opcode": 1,
-                    "payload": {"interactive": False}
-                }))
-            except Exception as e:
-                print("Heartbeat error:", e)
-            time.sleep(25)
+        while not self._t_stop:
+            if self._connected and self.websocket:
+                try:
+                    self.websocket.send(json.dumps({
+                        "ver": 11,
+                        "cmd": 0,
+                        "seq": self.seq,
+                        "opcode": 1,
+                        "payload": {"interactive": False},
+                    }))
+                except Exception as e:
+                    print("Heartbeat error:", e)
+            time.sleep(20)
 
 
     # region _listener()
@@ -356,6 +361,17 @@ class MaxClient:
 
         match opcode:
             case 1:
+                if recv.get("cmd") == 0:
+                    try:
+                        self.websocket.send(json.dumps({
+                            "ver": 11,
+                            "cmd": 1,
+                            "seq": recv.get("seq", 0),
+                            "opcode": 1,
+                            "payload": payload or {},
+                        }))
+                    except Exception:
+                        pass
                 return
             case 128:
                 self._inbox.put(recv)

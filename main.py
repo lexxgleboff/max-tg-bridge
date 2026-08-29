@@ -154,7 +154,7 @@ def _uname(client, uid):
         pass
     return str(uid)
 
-client._on_disconnect = lambda: alert("MAX websocket оборван, переподключаюсь", key="ws_down", cooldown=30)
+client._on_disconnect = lambda: alert("MAX websocket оборван, переподключаюсь", key="ws_down", cooldown=300)
 client._on_auth_error = lambda e: alert(f"MAX токен невалиден: {e}\nОбнови MAX_TOKEN в .env (web.max.ru)", key="auth", cooldown=300)
 client._on_error = lambda e: alert(str(e), key=str(e)[:50], cooldown=120)
 
