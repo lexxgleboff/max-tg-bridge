@@ -65,9 +65,10 @@ class MaxClient:
         self._on_token = None
         self._on_sync = None
         self._connected = False
-        self._planned_reconnect = False
         self._connect_quiet = False
+        self._refreshing = False
         self._sync = {}
+        self._sync_lock = threading.Lock()
         self._t = None
         self._t_stop = False
 
@@ -99,27 +100,38 @@ class MaxClient:
         return int("900"+str(int(time.time())))
 
     # region _generate_user_agent()
+    def _ua_payload(self) -> dict:
+        return {
+            "userAgent": {
+                "deviceType": "WEB",
+                "locale": "en",
+                "osVersion": "Windows",
+                "deviceName": "WebMax Lib",
+                "headerUserAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36",
+                "deviceLocale": "en",
+                "appVersion": "4.8.42",
+                "screen": "1920x1080 1.0x",
+                "timezone": "UTC"
+            },
+            "deviceId": self.device_id
+        }
+
     def _generate_user_agent(self) -> str:
         return json.dumps({
             "ver": 11,
             "cmd": 0,
             "seq": self.seq,
             "opcode": 6,
-            "payload": {
-                "userAgent": {
-                    "deviceType": "WEB",
-                    "locale": "en",
-                    "osVersion": "Windows",
-                    "deviceName": "WebMax Lib",
-                    "headerUserAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36",
-                    "deviceLocale": "en",
-                    "appVersion": "4.8.42",
-                    "screen": "1920x1080 1.0x",
-                    "timezone": "UTC"
-                },
-                "deviceId": self.device_id
-            }
+            "payload": self._ua_payload(),
         })
+
+    def _ws_headers(self):
+        return [
+            ("Origin", "https://web.max.ru"),
+            ("Pragma", "no-cache"),
+            ("Cache-Control", "no-cache"),
+            ("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+        ]
 
     # region connect()
     def connect(self, _f=None):
@@ -139,15 +151,11 @@ class MaxClient:
         """
         if self._connected:
             return
-        headers = [
-            ("Origin", "https://web.max.ru"),
-            ("Pragma", "no-cache"),
-            ("Cache-Control", "no-cache"),
-            ("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
-        ]
+        self._seq = 0
+        self.user_agent = self._generate_user_agent()
         self.websocket = connect(
             "wss://ws-api.oneme.ru/websocket",
-            additional_headers=headers,
+            additional_headers=self._ws_headers(),
             ping_interval=20,
             ping_timeout=20,
         )
@@ -190,9 +198,10 @@ class MaxClient:
                 self._on_sync()
             except Exception:
                 pass
-        if self._on_connect and not getattr(self, "_connect_quiet", False):
+        if self._on_connect and not self._connect_quiet:
             self._on_connect()
         self._connect_quiet = False
+        self._refreshing = False
 
     def _call(self, packet: dict, opcode=None, timeout=15):
         seq = packet["seq"]
@@ -307,43 +316,44 @@ class MaxClient:
                 print("on_token:", e)
 
     def _login_payload(self):
-        p = {
+        # Как у web.max.ru на WEB: каждый LOGIN с нулевыми счётчиками.
+        # lastLogin/presenceSync:-1 на WEB давали сбои при реконнекте.
+        return {
             "interactive": True,
             "token": self.auth_token,
-            "chatsSync": self._sync.get("chatsSync", 0),
-            "contactsSync": self._sync.get("contactsSync", 0),
-            "presenceSync": -1 if self._sync else 0,
-            "draftsSync": self._sync.get("draftsSync", 0),
+            "chatsSync": 0,
+            "contactsSync": 0,
+            "presenceSync": 0,
+            "draftsSync": 0,
             "chatsCount": 40,
         }
-        if "lastLogin" in self._sync:
-            p["lastLogin"] = self._sync["lastLogin"]
-        if self._sync.get("configHash"):
-            p["configHash"] = self._sync["configHash"]
-        return p
 
     def _remember_sync(self, p):
-        t = p.get("time") if p.get("time") is not None else p.get("serverTime")
-        if t is not None:
-            try:
-                self._sync["lastLogin"] = int(t)
-            except (TypeError, ValueError):
-                pass
-        for k in ("chatsSync", "contactsSync", "draftsSync"):
-            if p.get(k) is not None:
-                self._sync[k] = p[k]
-        if p.get("configHash"):
-            self._sync["configHash"] = p["configHash"]
+        with self._sync_lock:
+            t = p.get("time") if p.get("time") is not None else p.get("serverTime")
+            if t is not None:
+                try:
+                    self._sync["lastLogin"] = int(t)
+                except (TypeError, ValueError):
+                    pass
+            for k in ("chatsSync", "contactsSync", "draftsSync"):
+                if p.get(k) is not None:
+                    self._sync[k] = p[k]
+            if p.get("configHash"):
+                self._sync["configHash"] = p["configHash"]
 
     def refresh_session(self):
-        # Второй LOGIN на живом WS = Invalid session state. Нужен новый сокет.
+        # Второй LOGIN на живом WS = Invalid session state.
+        # Закрываем основной сокет; listener тихо поднимется заново и сделает LOGIN.
         if not self.websocket:
-            return
-        self._planned_reconnect = True
+            raise RuntimeError("нет websocket")
+        self._refreshing = True
+        self._connect_quiet = True
         try:
             self.websocket.close()
         except Exception as e:
-            self._planned_reconnect = False
+            self._refreshing = False
+            self._connect_quiet = False
             raise RuntimeError(f"close: {e}") from e
 
     def _session_refresh(self):
@@ -356,10 +366,17 @@ class MaxClient:
             if self._t_stop or not self._connected:
                 continue
             try:
-                self.refresh_session()
                 print("MAX session sync: переподключаюсь")
+                self.refresh_session()
             except Exception as e:
+                self._refreshing = False
+                self._connect_quiet = False
                 print("MAX session sync:", e)
+                if self._on_error:
+                    try:
+                        self._on_error(f"MAX sync: {e}")
+                    except Exception:
+                        pass
 
     # region _hlprocessor()
     def _hlprocessor(self, msg: Message):
@@ -401,6 +418,22 @@ class MaxClient:
         """Listener with batch processing for multiple messages"""
         while not self._t_stop:
             try:
+                if not self._connected or not self.websocket:
+                    time.sleep(1)
+                    try:
+                        self.connect()
+                    except Exception as ee:
+                        print("Не смог встать:", ee)
+                        self._refreshing = False
+                        self._connect_quiet = False
+                        if self._on_error:
+                            try:
+                                self._on_error(f"reconnect: {ee}")
+                            except Exception:
+                                pass
+                        time.sleep(5)
+                    continue
+
                 self._dispatch(json.loads(self.websocket.recv()))
                 while True:
                     try:
@@ -409,12 +442,11 @@ class MaxClient:
                         break
                     except ConnectionClosedError:
                         break
-                        
+
             except ConnectionClosedError:
-                planned = self._planned_reconnect
-                self._planned_reconnect = False
                 self._connected = False
-                if not planned and self._on_disconnect:
+                quiet = self._refreshing or self._connect_quiet
+                if not quiet and self._on_disconnect:
                     try:
                         self._on_disconnect()
                     except Exception:
@@ -424,30 +456,24 @@ class MaxClient:
                         self.websocket.close()
                 except Exception:
                     pass
-                time.sleep(0.2 if planned else 3)
-                try:
-                    self._connect_quiet = planned
-                    self.connect()
-                except Exception as ee:
-                    self._connect_quiet = False
-                    print("Не смог встать:", ee)
-                    if self._on_error:
-                        try:
-                            self._on_error(f"reconnect: {ee}")
-                        except Exception:
-                            pass
-                    time.sleep(5)
+                self.websocket = None
+                time.sleep(1 if quiet else 3)
 
             except Exception as e:
                 print(e)
                 self._connected = False
+                try:
+                    if self.websocket:
+                        self.websocket.close()
+                except Exception:
+                    pass
+                self.websocket = None
                 if self._on_error:
                     try:
                         self._on_error(str(e))
                     except Exception:
                         pass
                 time.sleep(5)
-                continue
 
     def _process_message(self, recv):
         """Process a single message"""
