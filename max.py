@@ -1,5 +1,5 @@
 from websockets.sync.client import connect
-from websockets.exceptions import ConnectionClosedError
+from websockets.exceptions import ConnectionClosed
 import json
 import threading
 import queue
@@ -440,10 +440,10 @@ class MaxClient:
                         self._dispatch(json.loads(self.websocket.recv(timeout=0.01)))
                     except TimeoutError:
                         break
-                    except ConnectionClosedError:
+                    except ConnectionClosed:
                         break
 
-            except ConnectionClosedError:
+            except ConnectionClosed:
                 self._connected = False
                 quiet = self._refreshing or self._connect_quiet
                 if not quiet and self._on_disconnect:
