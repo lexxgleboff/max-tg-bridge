@@ -60,7 +60,13 @@ _sent_lock = threading.Lock()
 _sent_to_max = []
 _max_to_tg = {}
 _react_seen = {}
-STATE = {"up": time.time(), "last_max": None, "last_tg": None, "ok": False, "token": None}
+STATE = {"up": time.time(), "last_max": None, "last_tg": None, "ok": False, "token": None, "sync": None}
+
+def _on_sync():
+    STATE["sync"] = time.time()
+    print("MAX session sync ok")
+
+client._on_sync = _on_sync
 
 def _on_token(tok: str):
     STATE["token"] = time.time()
@@ -184,6 +190,7 @@ def status_text():
         f"в работе: {_dur(STATE['up'])}\n"
         f"последняя MAX->TG: {_ago(STATE['last_max'])}\n"
         f"последняя TG->MAX: {_ago(STATE['last_tg'])}\n"
+        f"синк сессии: {_ago(STATE['sync'])}\n"
         f"ротация токена: {_ago(STATE['token'])}\n"
         + "\n".join(lines)
     )

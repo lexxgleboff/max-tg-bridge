@@ -63,7 +63,11 @@ class MaxClient:
         self._on_error = None
         self._on_reaction = None
         self._on_token = None
+        self._on_sync = None
         self._connected = False
+        self._planned_reconnect = False
+        self._connect_quiet = False
+        self._sync = {}
         self._t = None
         self._t_stop = False
 
@@ -158,15 +162,7 @@ class MaxClient:
             "cmd": 0,
             "seq": self.seq,
             "opcode": 19, 
-            "payload": {
-                "interactive": True,
-                "token": self.auth_token,
-                "chatsSync": 0,
-                "contactsSync": 0,
-                "presenceSync": 0,
-                "draftsSync": 0,
-                "chatsCount": 40
-            }
+            "payload": self._login_payload(),
         }))
 
         raw = json.loads(self.websocket.recv())
@@ -180,6 +176,7 @@ class MaxClient:
                     pass
             raise ValueError(f"MAX auth: {err}")
         self._apply_token_from(p)
+        self._remember_sync(p)
         usr = User(self, p["profile"])
         self.me = usr
         self._connected = True
@@ -188,8 +185,14 @@ class MaxClient:
             if cid is not None:
                 self._chat_titles[int(cid)] = c.get("title") or c.get("name") or ""
 
-        if self._on_connect:
+        if self._on_sync:
+            try:
+                self._on_sync()
+            except Exception:
+                pass
+        if self._on_connect and not getattr(self, "_connect_quiet", False):
             self._on_connect()
+        self._connect_quiet = False
 
     def _call(self, packet: dict, opcode=None, timeout=15):
         seq = packet["seq"]
@@ -303,33 +306,45 @@ class MaxClient:
             except Exception as e:
                 print("on_token:", e)
 
+    def _login_payload(self):
+        p = {
+            "interactive": True,
+            "token": self.auth_token,
+            "chatsSync": self._sync.get("chatsSync", 0),
+            "contactsSync": self._sync.get("contactsSync", 0),
+            "presenceSync": -1 if self._sync else 0,
+            "draftsSync": self._sync.get("draftsSync", 0),
+            "chatsCount": 40,
+        }
+        if "lastLogin" in self._sync:
+            p["lastLogin"] = self._sync["lastLogin"]
+        if self._sync.get("configHash"):
+            p["configHash"] = self._sync["configHash"]
+        return p
+
+    def _remember_sync(self, p):
+        t = p.get("time") if p.get("time") is not None else p.get("serverTime")
+        if t is not None:
+            try:
+                self._sync["lastLogin"] = int(t)
+            except (TypeError, ValueError):
+                pass
+        for k in ("chatsSync", "contactsSync", "draftsSync"):
+            if p.get(k) is not None:
+                self._sync[k] = p[k]
+        if p.get("configHash"):
+            self._sync["configHash"] = p["configHash"]
+
     def refresh_session(self):
-        if not self._connected or not self.websocket:
+        # Второй LOGIN на живом WS = Invalid session state. Нужен новый сокет.
+        if not self.websocket:
             return
-        raw = self._call({
-            "ver": 11,
-            "cmd": 0,
-            "seq": self.seq,
-            "opcode": 19,
-            "payload": {
-                "interactive": False,
-                "token": self.auth_token,
-                "chatsSync": 0,
-                "contactsSync": 0,
-                "presenceSync": -1,
-                "draftsSync": 0,
-                "chatsCount": 40,
-            },
-        }, 19, timeout=20)
-        p = raw.get("payload") or {}
-        if p.get("error"):
-            err = p.get("localizedMessage") or p.get("message") or p.get("error")
-            raise ValueError(f"MAX sync: {err}")
-        self._apply_token_from(p)
-        for c in p.get("chats") or []:
-            cid = c.get("id")
-            if cid is not None:
-                self._chat_titles[int(cid)] = c.get("title") or c.get("name") or ""
+        self._planned_reconnect = True
+        try:
+            self.websocket.close()
+        except Exception as e:
+            self._planned_reconnect = False
+            raise RuntimeError(f"close: {e}") from e
 
     def _session_refresh(self):
         while not self._t_stop:
@@ -342,14 +357,9 @@ class MaxClient:
                 continue
             try:
                 self.refresh_session()
-                print("MAX session sync ok")
+                print("MAX session sync: переподключаюсь")
             except Exception as e:
                 print("MAX session sync:", e)
-                if self._on_error:
-                    try:
-                        self._on_error(f"MAX sync: {e}")
-                    except Exception:
-                        pass
 
     # region _hlprocessor()
     def _hlprocessor(self, msg: Message):
@@ -401,8 +411,10 @@ class MaxClient:
                         break
                         
             except ConnectionClosedError:
+                planned = self._planned_reconnect
+                self._planned_reconnect = False
                 self._connected = False
-                if self._on_disconnect:
+                if not planned and self._on_disconnect:
                     try:
                         self._on_disconnect()
                     except Exception:
@@ -412,10 +424,12 @@ class MaxClient:
                         self.websocket.close()
                 except Exception:
                     pass
-                time.sleep(3)
+                time.sleep(0.2 if planned else 3)
                 try:
+                    self._connect_quiet = planned
                     self.connect()
                 except Exception as ee:
+                    self._connect_quiet = False
                     print("Не смог встать:", ee)
                     if self._on_error:
                         try:
