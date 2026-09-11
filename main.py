@@ -17,14 +17,71 @@ if not MAX_TOKEN or not TG_BOT_TOKEN or not MAX_TO_TG or not ALERT_CHAT:
     print("Ошибка в .env: нужны MAX_TOKEN, TG_BOT_TOKEN и BRIDGES (или MAX_CHAT_IDS+TG_CHAT_ID)")
     sys.exit(1)
 
+ENV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+if not os.path.isfile(ENV_PATH):
+    ENV_PATH = ".env"
+
+def persist_env(updates: dict):
+    try:
+        lines = []
+        if os.path.isfile(ENV_PATH):
+            with open(ENV_PATH, "r", encoding="utf-8") as f:
+                lines = f.read().splitlines()
+        done = set()
+        out = []
+        for line in lines:
+            key = line.split("=", 1)[0]
+            if key in updates and updates[key]:
+                out.append(f"{key}={updates[key]}")
+                done.add(key)
+            else:
+                out.append(line)
+        for key, value in updates.items():
+            if value and key not in done:
+                out.append(f"{key}={value}")
+        with open(ENV_PATH, "w", encoding="utf-8", newline="\n") as f:
+            f.write("\n".join(out) + "\n")
+    except Exception as e:
+        raise RuntimeError(f"{ENV_PATH}: {e}") from e
+
+try:
+    REFRESH_SEC = int(os.getenv("MAX_TOKEN_REFRESH_SEC") or 2700)
+except ValueError:
+    REFRESH_SEC = 2700
+
 setup_alerts(TG_BOT_TOKEN, ALERT_CHAT)
-client = Client(MAX_TOKEN)
+client = Client(
+    MAX_TOKEN,
+    device_id=os.getenv("MAX_DEVICE_ID") or None,
+    refresh_interval=REFRESH_SEC,
+)
 
 _sent_lock = threading.Lock()
 _sent_to_max = []
 _max_to_tg = {}
 _react_seen = {}
-STATE = {"up": time.time(), "last_max": None, "last_tg": None, "ok": False}
+STATE = {"up": time.time(), "last_max": None, "last_tg": None, "ok": False, "token": None}
+
+def _on_token(tok: str):
+    STATE["token"] = time.time()
+    try:
+        persist_env({"MAX_TOKEN": tok, "MAX_DEVICE_ID": client.device_id})
+        print("MAX_TOKEN обновлён и записан в .env")
+        alert("MAX токен обновлён, сохранён в .env", key="token_rot", cooldown=60)
+    except Exception as e:
+        print("MAX_TOKEN в памяти, .env не записан:", e)
+        alert(
+            f"MAX токен обновился в памяти, .env не записан: {e}\n"
+            "На NAS смонтируй .env без :ro",
+            key="token_rot_fail",
+            cooldown=300,
+        )
+
+client._on_token = _on_token
+try:
+    persist_env({"MAX_DEVICE_ID": client.device_id})
+except Exception as e:
+    print("не записал MAX_DEVICE_ID:", e)
 
 def remember_bridge_msg(max_chat, max_mid, tg_chat, tg_mid, snippet=""):
     if max_mid is None or not tg_mid:
@@ -127,6 +184,7 @@ def status_text():
         f"в работе: {_dur(STATE['up'])}\n"
         f"последняя MAX->TG: {_ago(STATE['last_max'])}\n"
         f"последняя TG->MAX: {_ago(STATE['last_tg'])}\n"
+        f"ротация токена: {_ago(STATE['token'])}\n"
         + "\n".join(lines)
     )
 

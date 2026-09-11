@@ -9,9 +9,26 @@ from uuid import uuid4
 from classes import *
 from errors import *
 
+def _find_login_token(obj):
+    if isinstance(obj, dict):
+        login = (obj.get("tokenAttrs") or {}).get("LOGIN") or {}
+        if isinstance(login, dict) and login.get("token"):
+            return login["token"]
+        for v in obj.values():
+            found = _find_login_token(v)
+            if found:
+                return found
+    elif isinstance(obj, list):
+        for v in obj:
+            found = _find_login_token(v)
+            if found:
+                return found
+    return None
+
 # region class MaxClient
 class MaxClient:
-    def __init__(self, token: str|None = None, phone: str|None = None):
+    def __init__(self, token: str|None = None, phone: str|None = None,
+                 device_id: str|None = None, refresh_interval: int = 2700):
         """
         Initializes a new instance of the MaxClient class.
 
@@ -33,6 +50,8 @@ class MaxClient:
 
         self.phone_number = phone
         self.auth_token = token
+        self.device_id = device_id or str(uuid4())
+        self._refresh_interval = max(600, int(refresh_interval or 2700))
         self.user_agent = self._generate_user_agent()
 
         self.websocket = None
@@ -43,6 +62,7 @@ class MaxClient:
         self._on_auth_error = None
         self._on_error = None
         self._on_reaction = None
+        self._on_token = None
         self._connected = False
         self._t = None
         self._t_stop = False
@@ -93,7 +113,7 @@ class MaxClient:
                     "screen": "1920x1080 1.0x",
                     "timezone": "UTC"
                 },
-                "deviceId": str(uuid4())
+                "deviceId": self.device_id
             }
         })
 
@@ -159,6 +179,7 @@ class MaxClient:
                 except Exception:
                     pass
             raise ValueError(f"MAX auth: {err}")
+        self._apply_token_from(p)
         usr = User(self, p["profile"])
         self.me = usr
         self._connected = True
@@ -271,6 +292,65 @@ class MaxClient:
         """
         self.auth_token = token
 
+    def _apply_token_from(self, obj):
+        tok = _find_login_token(obj)
+        if not tok or tok == self.auth_token:
+            return
+        self.auth_token = tok
+        if self._on_token:
+            try:
+                self._on_token(tok)
+            except Exception as e:
+                print("on_token:", e)
+
+    def refresh_session(self):
+        if not self._connected or not self.websocket:
+            return
+        raw = self._call({
+            "ver": 11,
+            "cmd": 0,
+            "seq": self.seq,
+            "opcode": 19,
+            "payload": {
+                "interactive": False,
+                "token": self.auth_token,
+                "chatsSync": 0,
+                "contactsSync": 0,
+                "presenceSync": -1,
+                "draftsSync": 0,
+                "chatsCount": 40,
+            },
+        }, 19, timeout=20)
+        p = raw.get("payload") or {}
+        if p.get("error"):
+            err = p.get("localizedMessage") or p.get("message") or p.get("error")
+            raise ValueError(f"MAX sync: {err}")
+        self._apply_token_from(p)
+        for c in p.get("chats") or []:
+            cid = c.get("id")
+            if cid is not None:
+                self._chat_titles[int(cid)] = c.get("title") or c.get("name") or ""
+
+    def _session_refresh(self):
+        while not self._t_stop:
+            left = self._refresh_interval
+            while left > 0 and not self._t_stop:
+                step = 5 if left > 5 else left
+                time.sleep(step)
+                left -= step
+            if self._t_stop or not self._connected:
+                continue
+            try:
+                self.refresh_session()
+                print("MAX session sync ok")
+            except Exception as e:
+                print("MAX session sync:", e)
+                if self._on_error:
+                    try:
+                        self._on_error(f"MAX sync: {e}")
+                    except Exception:
+                        pass
+
     # region _hlprocessor()
     def _hlprocessor(self, msg: Message):
         """Internal worker. Don't touch."""
@@ -297,6 +377,7 @@ class MaxClient:
 
     # region _listener()
     def _dispatch(self, recv):
+        self._apply_token_from(recv)
         seq = recv.get("seq")
         pending = self._rpc.get(seq)
         if pending:
@@ -427,6 +508,7 @@ class MaxClient:
         self._t.start()
         threading.Thread(target=self._heartbeat, name="WebMaxHeartbeat", daemon=True).start()
         threading.Thread(target=self._inbox_worker, name="WebMaxInbox", daemon=True).start()
+        threading.Thread(target=self._session_refresh, name="WebMaxSync", daemon=True).start()
     
     def stop(self):
         """
