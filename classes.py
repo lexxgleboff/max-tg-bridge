@@ -65,6 +65,15 @@ class Contact:
     def unblock(self):
         return self._client.contact_unblock(self.id)
 
+def _contact_dict(profile):
+    """LOGIN отдаёт profile.contact; get_user — уже плоский contact."""
+    if not isinstance(profile, dict):
+        return {}
+    if profile.get("id") is not None:
+        return profile
+    c = profile.get("contact")
+    return c if isinstance(c, dict) else profile
+
 # region User
 class User:
     def __init__(self, client, profile, _f=0):
@@ -75,14 +84,14 @@ class User:
         received from the server.
         """
         self._client = client
+        profile = _contact_dict(profile)
+        uid = profile.get("id")
+        if uid is None:
+            raise ValueError(f"profile without id: {list(profile)[:12]}")
         self.contact = Contact(client, **profile)
-        _id = client.me.contact.id if client.me else profile["id"]
+        _id = client.me.contact.id if client.me else uid
         if not _f:
-            self.chat = Chat(self._client, profile["id"] ^ _id)
-
-        if profile["id"] != _id:
-
-            pass
+            self.chat = Chat(self._client, uid ^ _id)
 
 # region Chat
 class Chat:
