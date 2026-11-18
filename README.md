@@ -80,9 +80,12 @@ python -m pip install -r requirements.txt
 Нужен LOGIN-токен веб-клиента (не SMS).
 
 1. Открой [web.max.ru](https://web.max.ru) и войди
-2. DevTools → Network → WS (`api.oneme.ru` / `ws-api.oneme.ru`)
+2. DevTools → Network → WS (`api.oneme.ru`)
 3. Найди пакет opcode `19` (логин/синк) и поле `token`
 4. Либо возьми base64 бинарного пакета и декодируй поле `token`
+
+Транспорт сейчас бинарный (msgpack + LZ4) на `wss://api.oneme.ru/websocket`, как у веб-клиента.
+Старый JSON на `ws-api.oneme.ru` с части сетей больше не открывается.
 
 Бот дома и на VPS с одним токеном одновременно не запускай.
 
@@ -195,7 +198,7 @@ python backfill.py -111
 
 Обновить `.py` или `.env` (новые мосты в `BRIDGES`): залей файл → контейнер **Стоп → Старт**. Stop/Start сам по себе Docker-переменные не обновляет — `.env` читается с диска при старте процесса.
 
-Если правишь `Dockerfile`/`requirements.txt`/`docker-compose.yml` — проект **удалить** (файлы на диске оставить) и **создать заново**. То же самое, если Stop/Start не подхватил новый `BRIDGES`. После смены compose `.env` должен монтироваться **без** `:ro`, иначе ротация токена не сохранится.
+Если правишь `Dockerfile`/`requirements.txt`/`docker-compose.yml` — проект **удалить** (файлы на диске оставить) и **создать заново** (нужно после обновления с `msgpack`/`lz4`). То же самое, если Stop/Start не подхватил новый `BRIDGES`. После смены compose `.env` должен монтироваться **без** `:ro`, иначе ротация токена не сохранится.
 
 Через SSH (Control Panel → Терминал → включить SSH, пользователь admin):
 

@@ -1,13 +1,88 @@
 from websockets.sync.client import connect
 from websockets.exceptions import ConnectionClosed
 import json
+import struct
 import threading
 import queue
 import websockets
 import time
 from uuid import uuid4
+import msgpack
+import lz4.block
 from classes import *
 from errors import *
+
+WS_URL = "wss://api.oneme.ru/websocket"
+PROTO_VER = 10
+HEADER_LEN = 10
+APP_VERSION = "26.11.9"
+
+def _ext_hook(code, data):
+    # веб-клиент: ext type 1 = bigint/number в msgpack
+    if code == 1:
+        val = msgpack.unpackb(data, raw=False, strict_map_key=False)
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            return val
+    return msgpack.ExtType(code, data)
+
+def _pack_packet(cmd: int, seq: int, opcode: int, payload=None) -> bytes:
+    body = b""
+    if payload is not None:
+        body = msgpack.packb(payload, use_bin_type=True)
+    comp = 0
+    if len(body) > 32:
+        try:
+            compressed = lz4.block.compress(body, store_size=False)
+            ratio = min(max(1, (len(body) + len(compressed) - 1) // max(len(compressed), 1)), 255)
+            if len(compressed) < len(body):
+                body = compressed
+                comp = ratio
+        except Exception:
+            comp = 0
+    ln = len(body)
+    hdr = struct.pack(">BBHHB", PROTO_VER, cmd, seq & 0xFFFF, opcode & 0xFFFF, comp)
+    hdr += bytes([(ln >> 16) & 255, (ln >> 8) & 255, ln & 255])
+    return hdr + body
+
+def _unpack_packet(data: bytes | bytearray | memoryview) -> dict:
+    if isinstance(data, str):
+        # старый JSON-транспорт больше не используется
+        return json.loads(data)
+    raw = bytes(data)
+    if len(raw) < HEADER_LEN:
+        raise ValueError(f"short packet: {len(raw)}")
+    ver, cmd, seq, opcode, comp = struct.unpack_from(">BBHHB", raw, 0)
+    ln = (raw[7] << 16) | (raw[8] << 8) | raw[9]
+    body = raw[HEADER_LEN:HEADER_LEN + ln]
+    if ln and len(body) != ln:
+        raise ValueError("LengthError")
+    if ln and comp > 0:
+        size = max(ln * comp, ln, 64)
+        last = None
+        for _ in range(6):
+            try:
+                body = lz4.block.decompress(body, uncompressed_size=size)
+                last = None
+                break
+            except Exception as e:
+                last = e
+                size *= 2
+        if last:
+            raise last
+    payload = None
+    if body:
+        payload = msgpack.unpackb(
+            body, raw=False, strict_map_key=False, ext_hook=_ext_hook
+        )
+    return {
+        "ver": ver,
+        "cmd": cmd,
+        "seq": seq & 0xFFFF,
+        "opcode": opcode,
+        "payload": payload,
+    }
 
 def _find_login_token(obj):
     if isinstance(obj, dict):
@@ -51,6 +126,7 @@ class MaxClient:
         self.phone_number = phone
         self.auth_token = token
         self.device_id = device_id or str(uuid4())
+        self.session_id = int(time.time() * 1000)
         self._refresh_interval = max(600, int(refresh_interval or 2700))
         self.user_agent = self._generate_user_agent()
 
@@ -74,7 +150,6 @@ class MaxClient:
 
         self.is_log_in = False
         self.me = None
-        self.session_id = int(time.time()*1000)
 
         self.handlers = []
         self._inbox = queue.Queue()
@@ -101,22 +176,27 @@ class MaxClient:
 
     # region _generate_user_agent()
     def _ua_payload(self) -> dict:
+        ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
         return {
             "userAgent": {
                 "deviceType": "WEB",
-                "locale": "en",
+                "pushDeviceType": "WEBPUSH",
+                "locale": "ru",
+                "deviceLocale": "ru",
                 "osVersion": "Windows",
-                "deviceName": "WebMax Lib",
-                "headerUserAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36",
-                "deviceLocale": "en",
-                "appVersion": "4.8.42",
-                "screen": "1920x1080 1.0x",
-                "timezone": "UTC"
+                "deviceName": "Chrome",
+                "headerUserAgent": ua,
+                "isPwa": False,
+                "appVersion": APP_VERSION,
+                "screen": "1080x1920 1.0x",
+                "timezone": "Europe/Moscow",
             },
-            "deviceId": self.device_id
+            "deviceId": self.device_id,
+            "clientSessionId": self.session_id,
         }
 
     def _generate_user_agent(self) -> str:
+        # совместимость со старым API; в connect уходит бинарный INIT
         return json.dumps({
             "ver": 11,
             "cmd": 0,
@@ -130,8 +210,25 @@ class MaxClient:
             ("Origin", "https://web.max.ru"),
             ("Pragma", "no-cache"),
             ("Cache-Control", "no-cache"),
-            ("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+            ("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36")
         ]
+
+    @staticmethod
+    def _seq_key(seq) -> int:
+        return int(seq) & 0xFFFF
+
+    def _ws_send(self, packet: dict):
+        cmd = int(packet.get("cmd", 0))
+        seq = self._seq_key(packet.get("seq", 0))
+        opcode = int(packet.get("opcode", 0))
+        self.websocket.send(_pack_packet(cmd, seq, opcode, packet.get("payload")))
+
+    def _ws_recv(self, timeout=None):
+        if timeout is None:
+            raw = self.websocket.recv()
+        else:
+            raw = self.websocket.recv(timeout=timeout)
+        return _unpack_packet(raw)
 
     # region connect()
     def connect(self, _f=None):
@@ -155,27 +252,31 @@ class MaxClient:
         self.user_agent = self._generate_user_agent()
         try:
             self.websocket = connect(
-                "wss://api.oneme.ru/websocket",
+                WS_URL,
                 additional_headers=self._ws_headers(),
                 ping_interval=20,
                 ping_timeout=20,
                 open_timeout=20,
             )
-            self.websocket.send(self.user_agent)
-            self.websocket.recv(timeout=20)
+            self._ws_send({
+                "cmd": 0,
+                "seq": self.seq,
+                "opcode": 6,
+                "payload": self._ua_payload(),
+            })
+            self._ws_recv(timeout=20)
 
             if _f:
                 return
 
-            self.websocket.send(json.dumps({
-                "ver": 11,
+            self._ws_send({
                 "cmd": 0,
                 "seq": self.seq,
                 "opcode": 19,
                 "payload": self._login_payload(),
-            }))
+            })
 
-            raw = json.loads(self.websocket.recv(timeout=20))
+            raw = self._ws_recv(timeout=20)
             p = raw.get("payload") or {}
             if p.get("error") or not p.get("profile"):
                 err = p.get("localizedMessage") or p.get("message") or p.get("error") or "нет profile"
@@ -215,20 +316,24 @@ class MaxClient:
             raise
 
     def _call(self, packet: dict, opcode=None, timeout=15):
-        seq = packet["seq"]
+        seq = self._seq_key(packet["seq"])
+        packet = dict(packet)
+        packet["seq"] = seq
         q = None
         if getattr(self, "_t", None) and self._t.is_alive():
             q = queue.Queue(maxsize=1)
             self._rpc[seq] = (opcode, q)
-        self.websocket.send(json.dumps(packet))
+        self._ws_send(packet)
         if q is not None:
             try:
                 return q.get(timeout=timeout)
             finally:
                 self._rpc.pop(seq, None)
         while True:
-            recv = json.loads(self.websocket.recv())
-            if recv.get("seq") == seq and (opcode is None or recv.get("opcode") == opcode):
+            recv = self._ws_recv()
+            if self._seq_key(recv.get("seq", 0)) == seq and (
+                opcode is None or recv.get("opcode") == opcode
+            ):
                 return recv
 
     def get_history(self, chat_id: int, from_ts: int | None = None, backward: int = 50) -> list:
@@ -401,13 +506,12 @@ class MaxClient:
         while not self._t_stop:
             if self._connected and self.websocket:
                 try:
-                    self.websocket.send(json.dumps({
-                        "ver": 11,
+                    self._ws_send({
                         "cmd": 0,
                         "seq": self.seq,
                         "opcode": 1,
                         "payload": {"interactive": False},
-                    }))
+                    })
                 except Exception as e:
                     print("Heartbeat error:", e)
             time.sleep(20)
@@ -416,7 +520,7 @@ class MaxClient:
     # region _listener()
     def _dispatch(self, recv):
         self._apply_token_from(recv)
-        seq = recv.get("seq")
+        seq = self._seq_key(recv.get("seq", 0))
         pending = self._rpc.get(seq)
         if pending:
             exp, q = pending
@@ -445,10 +549,10 @@ class MaxClient:
                         time.sleep(5)
                     continue
 
-                self._dispatch(json.loads(self.websocket.recv()))
+                self._dispatch(self._ws_recv())
                 while True:
                     try:
-                        self._dispatch(json.loads(self.websocket.recv(timeout=0.01)))
+                        self._dispatch(self._ws_recv(timeout=0.01))
                     except TimeoutError:
                         break
                     except ConnectionClosed:
@@ -495,13 +599,12 @@ class MaxClient:
             case 1:
                 if recv.get("cmd") == 0:
                     try:
-                        self.websocket.send(json.dumps({
-                            "ver": 11,
+                        self._ws_send({
                             "cmd": 1,
                             "seq": recv.get("seq", 0),
                             "opcode": 1,
                             "payload": payload or {},
-                        }))
+                        })
                     except Exception:
                         pass
                 return
@@ -617,7 +720,7 @@ class MaxClient:
         if self.is_log_in:
             raise ValueError("Client is logged in now")
         
-        self.websocket.send(json.dumps({
+        self._ws_send({
             "ver": 11,
             "cmd": 0,
             "seq": self.seq,
@@ -627,13 +730,13 @@ class MaxClient:
                 "type": "START_AUTH",
                 "language": "ru"
             }
-        }))
+        })
 
-        return json.loads(self.websocket.recv()) # experimental
+        return self._ws_recv()  # experimental
     
     # region _check_code()
     def _check_code(self, token, code) -> dict:
-        self.websocket.send(json.dumps({
+        self._ws_send({
             "ver": 11,
             "cmd": 0,
             "seq": self.seq,
@@ -643,9 +746,9 @@ class MaxClient:
                 "verifyCode": code,
                 "authTokenType": "CHECK_CODE"
             }
-        }))
+        })
 
-        token_resp = json.loads(self.websocket.recv())
+        token_resp = self._ws_recv()
         payload = token_resp['payload']
         error = token_resp['payload'].get("error", None)
 
@@ -703,7 +806,7 @@ class MaxClient:
     #     if not self.auth_token:
     #         raise ValueError("No auth token provided. Please authenticate first.")
 
-    #     self.websocket.send(json.dumps({
+    #     self._ws_send({
     #         "ver": 11,
     #         "cmd": 0,
     #         "seq": self.seq,
@@ -717,7 +820,7 @@ class MaxClient:
     #             "draftsSync": 0,
     #             "chatsCount": count
     #         }
-    #     }))
+    #     })
 
     #     response = json.loads(self.websocket.recv())
     #     return response
@@ -829,7 +932,7 @@ class MaxClient:
             client.delete_message(12345678, ["1000120"], for_me=True)
             ```
         """
-        self.websocket.send(json.dumps({
+        self._ws_send({
             "ver":11,
             "cmd":0,
             "seq":self.seq,
@@ -839,7 +942,7 @@ class MaxClient:
                 "messageIds": message_ids,
                 "forMe": for_me
             }
-        }))
+        })
 
     # region edit_message()
     def edit_message(self, chat_id: int, message_id: str|int, text: str):
@@ -867,7 +970,7 @@ class MaxClient:
             ```
         """
         seq = self.seq
-        self.websocket.send(json.dumps({
+        self._ws_send({
             "ver": 11,
             "cmd": 0,
             "seq": seq,
@@ -879,10 +982,10 @@ class MaxClient:
                 "elements": [],
                 "attachments": []
             }
-        }))
+        })
 
         while True:
-            recv = json.loads(self.websocket.recv())
+            recv = self._ws_recv()
             if recv["seq"] != seq:
                 pass
             else:
@@ -909,7 +1012,7 @@ class MaxClient:
                 }
             }
         }
-        self.websocket.send(json.dumps(j))
+        self._ws_send(j)
         return True
 
     # region unpin_chat()
@@ -929,7 +1032,7 @@ class MaxClient:
                 }
             }
         }
-        self.websocket.send(json.dumps(j))
+        self._ws_send(j)
         return True
     
     # region get_user()
@@ -1000,7 +1103,7 @@ class MaxClient:
     def session_exit(self):
         """Terminates active session token. **There no way back.**"""
         j = {"ver":11,"cmd":0,"seq":self.seq,"opcode":20,"payload":{}}
-        self.websocket.send(json.dumps(j))
+        self._ws_send(j)
         self.disconnect()
         return True
 
@@ -1032,10 +1135,10 @@ class MaxClient:
         """
         seq = self.seq
         j = {"ver":11,"cmd":0,"seq":seq,"opcode":178,"payload":{"chatId":chat_id,"messageId":message_id,"reaction":{"reactionType":"EMOJI","id":reaction}}}
-        self.websocket.send(json.dumps(j))
+        self._ws_send(j)
 
         while True:
-            recv = json.loads(self.websocket.recv())
+            recv = self._ws_recv()
             if recv["seq"] != seq:
                 pass
             else:
@@ -1049,10 +1152,10 @@ class MaxClient:
     def contact_add(self, user_id: int):
         seq = self.seq
         j = {"ver":11, "cmd":0, "seq":seq, "opcode":34, "payload":{"contactId": user_id, "action": "ADD"}}
-        self.websocket.send(json.dumps(j))
+        self._ws_send(j)
 
         while True:
-            recv = json.loads(self.websocket.recv())
+            recv = self._ws_recv()
             if recv["seq"] != seq:
                 pass
             else:
@@ -1065,10 +1168,10 @@ class MaxClient:
     def contact_remove(self, user_id: int):
         seq = self.seq
         j = {"ver":11, "cmd":0, "seq":seq, "opcode":34, "payload":{"contactId": user_id, "action": "REMOVE"}}
-        self.websocket.send(json.dumps(j))
+        self._ws_send(j)
 
         while True:
-            recv = json.loads(self.websocket.recv())
+            recv = self._ws_recv()
             if recv["seq"] != seq:
                 pass
             else:
@@ -1080,10 +1183,10 @@ class MaxClient:
     def contact_block(self, user_id: int):
         seq = self.seq
         j = {"ver":11, "cmd":0, "seq":seq, "opcode":34, "payload":{"contactId": user_id, "action": "BLOCK"}}
-        self.websocket.send(json.dumps(j))
+        self._ws_send(j)
 
         while True:
-            recv = json.loads(self.websocket.recv())
+            recv = self._ws_recv()
             if recv["seq"] != seq:
                 pass
             else:
@@ -1095,10 +1198,10 @@ class MaxClient:
     def contact_unblock(self, user_id: int):
         seq = self.seq
         j = {"ver":11, "cmd":0, "seq":seq, "opcode":34, "payload":{"contactId": user_id, "action": "UNBLOCK"}}
-        self.websocket.send(json.dumps(j))
+        self._ws_send(j)
 
         while True:
-            recv = json.loads(self.websocket.recv())
+            recv = self._ws_recv()
             if recv["seq"] != seq:
                 pass
             else:

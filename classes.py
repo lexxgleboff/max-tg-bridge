@@ -108,12 +108,17 @@ class Chat:
         if chat_id == 0 or _f:
             return
 
-        seq = client.seq
-        client.websocket.send(json.dumps({"ver":11,"cmd":0,"seq":seq,"opcode":49,"payload":{"chatId":chat_id,"from":int(time.time()*1000),"forward":0,"backward":30,"getMessages":True}}))
+        seq = client.seq & 0xFFFF
+        client._ws_send({"cmd": 0, "seq": seq, "opcode": 49, "payload": {
+            "chatId": chat_id,
+            "from": int(time.time() * 1000),
+            "forward": 0,
+            "backward": 30,
+            "getMessages": True,
+        }})
         while True:
-            r = client.websocket.recv()
-            recv = json.loads(r)
-            if recv["seq"] == seq and recv["opcode"] == 49:
+            recv = client._ws_recv()
+            if (recv.get("seq", 0) & 0xFFFF) == seq and recv.get("opcode") == 49:
                 break
 
         payload = recv["payload"]
