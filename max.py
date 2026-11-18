@@ -153,55 +153,66 @@ class MaxClient:
             return
         self._seq = 0
         self.user_agent = self._generate_user_agent()
-        self.websocket = connect(
-            "wss://ws-api.oneme.ru/websocket",
-            additional_headers=self._ws_headers(),
-            ping_interval=20,
-            ping_timeout=20,
-        )
-        self.websocket.send(self.user_agent)
-        self.websocket.recv()
+        try:
+            self.websocket = connect(
+                "wss://ws-api.oneme.ru/websocket",
+                additional_headers=self._ws_headers(),
+                ping_interval=20,
+                ping_timeout=20,
+                open_timeout=20,
+            )
+            self.websocket.send(self.user_agent)
+            self.websocket.recv(timeout=20)
 
-        if _f:
-            return
+            if _f:
+                return
 
-        self.websocket.send(json.dumps({
-            "ver": 11,
-            "cmd": 0,
-            "seq": self.seq,
-            "opcode": 19, 
-            "payload": self._login_payload(),
-        }))
+            self.websocket.send(json.dumps({
+                "ver": 11,
+                "cmd": 0,
+                "seq": self.seq,
+                "opcode": 19,
+                "payload": self._login_payload(),
+            }))
 
-        raw = json.loads(self.websocket.recv())
-        p = raw.get("payload") or {}
-        if p.get("error") or not p.get("profile"):
-            err = p.get("localizedMessage") or p.get("message") or p.get("error") or "нет profile"
-            if self._on_auth_error:
+            raw = json.loads(self.websocket.recv(timeout=20))
+            p = raw.get("payload") or {}
+            if p.get("error") or not p.get("profile"):
+                err = p.get("localizedMessage") or p.get("message") or p.get("error") or "нет profile"
+                if self._on_auth_error:
+                    try:
+                        self._on_auth_error(err)
+                    except Exception:
+                        pass
+                raise ValueError(f"MAX auth: {err}")
+            self._apply_token_from(p)
+            self._remember_sync(p)
+            usr = User(self, p["profile"])
+            self.me = usr
+            self._connected = True
+            for c in p.get("chats") or []:
+                cid = c.get("id")
+                if cid is not None:
+                    self._chat_titles[int(cid)] = c.get("title") or c.get("name") or ""
+
+            if self._on_sync:
                 try:
-                    self._on_auth_error(err)
+                    self._on_sync()
                 except Exception:
                     pass
-            raise ValueError(f"MAX auth: {err}")
-        self._apply_token_from(p)
-        self._remember_sync(p)
-        usr = User(self, p["profile"])
-        self.me = usr
-        self._connected = True
-        for c in p.get("chats") or []:
-            cid = c.get("id")
-            if cid is not None:
-                self._chat_titles[int(cid)] = c.get("title") or c.get("name") or ""
-
-        if self._on_sync:
+            if self._on_connect and not self._connect_quiet:
+                self._on_connect()
+            self._connect_quiet = False
+            self._refreshing = False
+        except Exception:
             try:
-                self._on_sync()
+                if self.websocket:
+                    self.websocket.close()
             except Exception:
                 pass
-        if self._on_connect and not self._connect_quiet:
-            self._on_connect()
-        self._connect_quiet = False
-        self._refreshing = False
+            self.websocket = None
+            self._connected = False
+            raise
 
     def _call(self, packet: dict, opcode=None, timeout=15):
         seq = packet["seq"]
@@ -542,7 +553,24 @@ class MaxClient:
             client.run()
             ```
         """
-        self.connect()
+        delay = 3
+        while not self._t_stop:
+            try:
+                self.connect()
+                break
+            except ValueError:
+                raise
+            except Exception as e:
+                print("MAX connect:", e)
+                if self._on_error:
+                    try:
+                        self._on_error(f"MAX connect: {e}")
+                    except Exception:
+                        pass
+                time.sleep(delay)
+                delay = min(delay * 2, 60)
+        if self._t_stop:
+            return
         self._t = threading.Thread(target=self._listener, name="WebMaxListener")
         self._t.daemon = True  # Добавляем daemon=True для автоматического завершения
         self._t.start()

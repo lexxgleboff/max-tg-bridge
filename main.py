@@ -336,11 +336,11 @@ def tg_poll():
             alert(f"TG poll: {e}", key="tg_poll", cooldown=120)
             time.sleep(5)
 
+threading.Thread(target=tg_poll, name="TgPoll", daemon=True).start()
+alert("скрипт запущен, жду MAX…", key="boot", cooldown=10)
 try:
     client.run()
 except ValueError as e:
     alert(str(e), key="boot", cooldown=10)
     raise
-threading.Thread(target=tg_poll, name="TgPoll", daemon=True).start()
-alert("скрипт запущен, жду MAX…", key="boot", cooldown=10)
 threading.Event().wait()
