@@ -80,7 +80,7 @@ python -m pip install -r requirements.txt
 Нужен LOGIN-токен веб-клиента (не SMS).
 
 1. Открой [web.max.ru](https://web.max.ru) и войди
-2. DevTools → Network → WS (`ws-api.oneme.ru`)
+2. DevTools → Network → WS (`api.oneme.ru` / `ws-api.oneme.ru`)
 3. Найди пакет opcode `19` (логин/синк) и поле `token`
 4. Либо возьми base64 бинарного пакета и декодируй поле `token`
 
@@ -209,7 +209,7 @@ sudo docker compose logs -f
 
 Если `docker compose` нет: `sudo docker-compose`. Образ `python:3.12-slim` есть для x86_64 и arm64 (плюс-модели и новые ARM). Старый 32-bit ARM — не взлетит.
 
-Firewall DSM: исходящие 443 к `api.telegram.org` и `wss://ws-api.oneme.ru` не режь.
+Firewall DSM: исходящие 443 к `api.telegram.org` и `wss://api.oneme.ru` не режь.
 
 ### VPS
 

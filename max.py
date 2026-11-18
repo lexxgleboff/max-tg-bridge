@@ -155,7 +155,7 @@ class MaxClient:
         self.user_agent = self._generate_user_agent()
         try:
             self.websocket = connect(
-                "wss://ws-api.oneme.ru/websocket",
+                "wss://api.oneme.ru/websocket",
                 additional_headers=self._ws_headers(),
                 ping_interval=20,
                 ping_timeout=20,
